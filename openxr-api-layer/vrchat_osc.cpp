@@ -37,19 +37,29 @@ namespace openxr_api_layer {
     using namespace log;
 
     struct VRChatOSCEyeTracker : IEyeTracker, osc::OscPacketListener {
-          //VRChat's packets run over port 9000. This can be set to other ports if the software supports, we're using port 9020 here.
-        VRChatOSCEyeTracker() : m_socket(IpEndpointName(IpEndpointName::ANY_ADDRESS, 9020), this) {
+        // VRChat's packets run over port 9000. This can be set to other ports if the software supports, we're using
+        // port 9020 here.
+        VRChatOSCEyeTracker() {
+            HANDLE Mutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\baballonia-unique-id");
+            if (!Mutex) {
+                TraceLoggingWrite(g_traceProvider, "BaballoniaTracker_NoService");
+                throw EyeTrackerNotSupportedException();
+            }
+            CloseHandle(Mutex);
+
+            m_socket =
+                std::make_unique<UdpListeningReceiveSocket>(IpEndpointName(IpEndpointName::ANY_ADDRESS, 9020), this);
         }
 
         ~VRChatOSCEyeTracker() override {
             if (m_started) {
-                m_socket.AsynchronousBreak();
+                m_socket->AsynchronousBreak();
                 m_listeningThread.join();
             }
         }
 
         void start(XrSession session) override {
-            m_listeningThread = std::thread([&]() { m_socket.Run(); });
+            m_listeningThread = std::thread([&]() { m_socket->Run(); });
             m_started = true;
         }
 
@@ -101,17 +111,17 @@ namespace openxr_api_layer {
                     XrVector3f unitVector = {
                         (sin(leftYawRad) * cos(leftPitchRad) + sin(rightYawRad) * cos(rightPitchRad)) / 2,
                         (sin(leftPitchRad) + sin(rightPitchRad)) / 2,
-                        (-cos(leftYawRad) * cos(leftPitchRad) - cos(rightYawRad) * cos(rightPitchRad)) / 2
-                    };
-                   
-                    TraceLoggingWrite(g_traceProvider,
-                                        "VRChatOSCEyeTracker_ProcessMessage",
-                                        TLArg(leftPitch, "LeftPitch"),
-                                        TLArg(leftYaw, "LeftYaw"),
-                                        TLArg(rightPitch, "RightPitch"),
-                                        TLArg(rightYaw, "RightYaw"));
+                        (-cos(leftYawRad) * cos(leftPitchRad) - cos(rightYawRad) * cos(rightPitchRad)) / 2};
 
-                    if (!(std::isnan(leftPitch) || std::isnan(leftYaw) || std::isnan(rightPitch) || std::isnan(rightYaw))) {
+                    TraceLoggingWrite(g_traceProvider,
+                                      "VRChatOSCEyeTracker_ProcessMessage",
+                                      TLArg(leftPitch, "LeftPitch"),
+                                      TLArg(leftYaw, "LeftYaw"),
+                                      TLArg(rightPitch, "RightPitch"),
+                                      TLArg(rightYaw, "RightYaw"));
+
+                    if (!(std::isnan(leftPitch) || std::isnan(leftYaw) || std::isnan(rightPitch) ||
+                          std::isnan(rightYaw))) {
                         std::unique_lock lock(m_mutex);
                         m_latestGaze = unitVector;
                         m_lastReceivedTime = now;
@@ -119,12 +129,13 @@ namespace openxr_api_layer {
                 }
             } catch (osc::Exception& e) {
                 TraceLoggingWrite(g_traceProvider, "VRChatOSCEyeTracker_ProcessMessage", TLArg(e.what(), "Error"));
+                throw EyeTrackerNotSupportedException();
             }
         }
 
         bool m_started{false};
         std::thread m_listeningThread;
-        UdpListeningReceiveSocket m_socket;
+        std::unique_ptr<UdpListeningReceiveSocket> m_socket;
         mutable std::mutex m_mutex;
         XrVector3f m_latestGaze{};
         std::chrono::high_resolution_clock::time_point m_lastReceivedTime{};
@@ -133,7 +144,7 @@ namespace openxr_api_layer {
     std::unique_ptr<IEyeTracker> createVRChatOSCEyeTracker() {
         try {
             return std::make_unique<VRChatOSCEyeTracker>();
-        } catch (...) {
+        } catch (EyeTrackerNotSupportedException&) {
             return {};
         }
     }
